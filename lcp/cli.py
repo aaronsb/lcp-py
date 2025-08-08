@@ -56,11 +56,37 @@ def search(query: str, limit: int):
         
         console.print(f"\n[bold]Found {len(models)} model(s) for '{query}':[/bold]\n")
         
+        # Get hardware profile for memory breakdown
+        hardware = config_manager.get_hardware_profile()
+        
         for i, model in enumerate(models, 1):
             console.print(f"{i:2d}. [cyan]{model.display_name}[/cyan]")
             console.print(f"    [dim]{model.repo_id}/{model.filename}[/dim]")
+            
             if model.size_gb:
-                console.print(f"    [green]{model.size_gb:.1f} GB[/green]")
+                # Calculate memory breakdown
+                from .hardware import get_model_memory_breakdown
+                breakdown = get_model_memory_breakdown(model.size_gb, hardware)
+                
+                # Build memory breakdown display
+                memory_parts = []
+                if breakdown["vram_gb"] > 0:
+                    color = breakdown["vram_color"]
+                    memory_parts.append(f"[{color}]{breakdown['vram_gb']:.1f}GB VRAM[/{color}]")
+                
+                if breakdown["system_ram_gb"] > 0:
+                    color = breakdown["ram_color"] 
+                    memory_parts.append(f"[{color}]{breakdown['system_ram_gb']:.1f}GB RAM[/{color}]")
+                
+                if breakdown["storage_gb"] > 0:
+                    color = breakdown["storage_color"]
+                    memory_parts.append(f"[{color}]{breakdown['storage_gb']:.1f}GB Storage[/{color}]")
+                
+                # Show total size and breakdown
+                feasible_icon = "✅" if breakdown["feasible"] else "⚠️"
+                memory_breakdown = " + ".join(memory_parts) if memory_parts else f"[green]{model.size_gb:.1f} GB[/green]"
+                
+                console.print(f"    {feasible_icon} {memory_breakdown}")
             console.print()
     
     asyncio.run(run_search())
@@ -222,6 +248,80 @@ def config_show():
 def config_edit():
     """Edit configuration file."""
     import subprocess
+
+
+@config.group()
+def hwprofile():
+    """Hardware profiling for intelligent model selection."""
+    pass
+
+
+@hwprofile.command('show')
+def hwprofile_show():
+    """Show current hardware profile."""
+    from rich.table import Table
+    from rich.panel import Panel
+    
+    profile = config_manager.get_hardware_profile()
+    
+    console.print()
+    console.print(Panel.fit("🖥️  Hardware Profile", border_style="cyan"))
+    console.print()
+    
+    # System Information
+    console.print("[bold]System Information:[/bold]")
+    console.print(f"  Platform: [cyan]{profile.platform}[/cyan]")
+    console.print(f"  CPU: [cyan]{profile.cpu_model}[/cyan]")
+    console.print(f"  Cores: [cyan]{profile.cpu_cores}[/cyan] physical, [cyan]{profile.cpu_threads}[/cyan] threads")
+    console.print()
+    
+    # Memory Information
+    console.print("[bold]Memory:[/bold]")
+    console.print(f"  System RAM: [cyan]{profile.system_ram_gb:.1f} GB[/cyan] total, [green]{profile.available_ram_gb:.1f} GB[/green] available")
+    if profile.gpu_count > 0:
+        console.print(f"  GPU VRAM: [cyan]{profile.total_vram_gb:.1f} GB[/cyan] total, [green]{profile.available_vram_gb:.1f} GB[/green] available")
+        for i, gpu_model in enumerate(profile.gpu_models):
+            console.print(f"    GPU {i+1}: [cyan]{gpu_model}[/cyan]")
+    else:
+        console.print("  No GPUs detected")
+    console.print()
+    
+    # Storage Information  
+    console.print("[bold]Storage:[/bold]")
+    console.print(f"  Available: [cyan]{profile.available_storage_gb:.1f} GB[/cyan]")
+    console.print(f"  Type: [cyan]{profile.storage_type}[/cyan]")
+    console.print()
+    
+    # Recommendations
+    console.print("[bold]Recommendations:[/bold]")
+    console.print(f"  Max Model Size: [green]{profile.recommended_max_model_size_gb:.1f} GB[/green]")
+    console.print(f"  GPU Offloading: [green]{'Yes' if profile.can_offload_to_gpu else 'No'}[/green]")
+    console.print(f"  Optimal Quantization: [cyan]{profile.optimal_quantization}[/cyan]")
+    console.print()
+    
+    if profile.profile_date:
+        from datetime import datetime
+        try:
+            profile_date = datetime.fromisoformat(profile.profile_date)
+            formatted_date = profile_date.strftime("%Y-%m-%d %H:%M:%S")
+            console.print(f"[dim]Profile created: {formatted_date}[/dim]")
+        except:
+            console.print(f"[dim]Profile created: {profile.profile_date}[/dim]")
+
+
+@hwprofile.command('update')
+def hwprofile_update():
+    """Update hardware profile with current system information."""
+    with console.status("🔧 Profiling hardware...", spinner="dots"):
+        profile = config_manager.update_hardware_profile()
+    
+    console.print("[green]✅ Hardware profile updated![/green]")
+    console.print()
+    
+    # Show key changes
+    console.print(f"Max recommended model size: [green]{profile.recommended_max_model_size_gb:.1f} GB[/green]")
+    console.print(f"GPU offloading: [green]{'Available' if profile.can_offload_to_gpu else 'Not available'}[/green]")
+    console.print(f"Optimal quantization: [cyan]{profile.optimal_quantization}[/cyan]")
     import os
     
     config_file = config_manager.config_file

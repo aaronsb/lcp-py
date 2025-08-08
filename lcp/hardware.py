@@ -1,0 +1,237 @@
+"""Hardware profiling for intelligent model selection."""
+
+import platform
+import psutil
+import shutil
+from pathlib import Path
+from datetime import datetime
+from typing import List, Optional, Dict, Any
+
+try:
+    import GPUtil
+except ImportError:
+    GPUtil = None
+
+from .config import HardwareProfile
+
+
+def detect_gpu_info() -> tuple[int, List[str], float, float]:
+    """Detect GPU information using multiple methods."""
+    gpu_count = 0
+    gpu_models = []
+    total_vram_gb = 0.0
+    available_vram_gb = 0.0
+    
+    # Try GPUtil first (NVIDIA GPUs)
+    if GPUtil:
+        try:
+            gpus = GPUtil.getGPUs()
+            gpu_count = len(gpus)
+            for gpu in gpus:
+                gpu_models.append(gpu.name)
+                total_vram_gb += gpu.memoryTotal / 1024  # Convert MB to GB
+                available_vram_gb += gpu.memoryFree / 1024
+        except Exception:
+            pass
+    
+    # Fallback: Try nvidia-ml-py if GPUtil failed
+    if gpu_count == 0:
+        try:
+            import pynvml
+            pynvml.nvmlInit()
+            gpu_count = pynvml.nvmlDeviceGetCount()
+            
+            for i in range(gpu_count):
+                handle = pynvml.nvmlDeviceGetHandleByIndex(i)
+                name = pynvml.nvmlDeviceGetName(handle).decode()
+                gpu_models.append(name)
+                
+                memory_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                total_vram_gb += memory_info.total / (1024**3)  # Convert bytes to GB
+                available_vram_gb += memory_info.free / (1024**3)
+                
+        except Exception:
+            pass
+    
+    return gpu_count, gpu_models, total_vram_gb, available_vram_gb
+
+
+def detect_storage_info(path: Path) -> tuple[float, str]:
+    """Detect storage information for a given path."""
+    try:
+        # Get available space
+        total, used, free = shutil.disk_usage(path)
+        available_gb = free / (1024**3)
+        
+        # Try to detect storage type (basic detection)
+        storage_type = "unknown"
+        
+        # Check if it's likely SSD vs HDD (very basic heuristic)
+        try:
+            # This is a very basic check - in practice, you'd want more sophisticated detection
+            if platform.system() == "Linux":
+                # Try to read from /proc/mounts or /sys/block for more accurate detection
+                storage_type = "SSD"  # Default assumption for modern systems
+            else:
+                storage_type = "unknown"
+        except Exception:
+            storage_type = "unknown"
+        
+        return available_gb, storage_type
+    except Exception:
+        return 0.0, "unknown"
+
+
+def get_cpu_info() -> tuple[int, int, str]:
+    """Get CPU information."""
+    try:
+        cpu_cores = psutil.cpu_count(logical=False) or 0
+        cpu_threads = psutil.cpu_count(logical=True) or 0
+        
+        # Get CPU model name
+        cpu_model = platform.processor()
+        if not cpu_model or cpu_model == "":
+            # Fallback for Linux systems
+            try:
+                with open("/proc/cpuinfo", "r") as f:
+                    for line in f:
+                        if line.startswith("model name"):
+                            cpu_model = line.split(":", 1)[1].strip()
+                            break
+            except Exception:
+                cpu_model = "Unknown CPU"
+        
+        return cpu_cores, cpu_threads, cpu_model
+    except Exception:
+        return 0, 0, "Unknown CPU"
+
+
+def get_memory_info() -> tuple[float, float]:
+    """Get system memory information."""
+    try:
+        memory = psutil.virtual_memory()
+        system_ram_gb = memory.total / (1024**3)
+        available_ram_gb = memory.available / (1024**3)
+        return system_ram_gb, available_ram_gb
+    except Exception:
+        return 0.0, 0.0
+
+
+def calculate_recommendations(profile: HardwareProfile) -> HardwareProfile:
+    """Calculate hardware-based recommendations."""
+    # Determine if GPU offloading is viable
+    profile.can_offload_to_gpu = profile.total_vram_gb >= 8.0  # Minimum 8GB for reasonable offloading
+    
+    # Calculate recommended max model size
+    if profile.can_offload_to_gpu:
+        # Primary constraint is VRAM for GPU-offloaded models
+        profile.recommended_max_model_size_gb = profile.available_vram_gb * 0.8  # 80% of available VRAM
+    else:
+        # Primary constraint is system RAM for CPU-only models  
+        profile.recommended_max_model_size_gb = profile.available_ram_gb * 0.5  # 50% of available RAM
+    
+    # Choose optimal quantization based on available resources
+    if profile.recommended_max_model_size_gb >= 20:
+        profile.optimal_quantization = "Q5_K_M"  # Higher quality for high-memory systems
+    elif profile.recommended_max_model_size_gb >= 15:
+        profile.optimal_quantization = "Q4_K_M"  # Balanced quality/size
+    elif profile.recommended_max_model_size_gb >= 10:
+        profile.optimal_quantization = "Q4_K_S"  # Smaller but decent quality
+    else:
+        profile.optimal_quantization = "Q3_K_M"  # Smaller models for limited systems
+    
+    return profile
+
+
+def create_hardware_profile(models_dir: Optional[Path] = None) -> HardwareProfile:
+    """Create a comprehensive hardware profile."""
+    # Get CPU information
+    cpu_cores, cpu_threads, cpu_model = get_cpu_info()
+    
+    # Get memory information
+    system_ram_gb, available_ram_gb = get_memory_info()
+    
+    # Get GPU information
+    gpu_count, gpu_models, total_vram_gb, available_vram_gb = detect_gpu_info()
+    
+    # Get storage information (use models directory or home directory)
+    storage_path = models_dir or Path.home()
+    available_storage_gb, storage_type = detect_storage_info(storage_path)
+    
+    # Create the profile
+    profile = HardwareProfile(
+        cpu_cores=cpu_cores,
+        cpu_threads=cpu_threads,
+        cpu_model=cpu_model,
+        system_ram_gb=system_ram_gb,
+        available_ram_gb=available_ram_gb,
+        gpu_count=gpu_count,
+        gpu_models=gpu_models,
+        total_vram_gb=total_vram_gb,
+        available_vram_gb=available_vram_gb,
+        available_storage_gb=available_storage_gb,
+        storage_type=storage_type,
+        profile_date=datetime.now().isoformat(),
+        platform=platform.system()
+    )
+    
+    # Calculate recommendations
+    profile = calculate_recommendations(profile)
+    
+    return profile
+
+
+def get_model_memory_breakdown(model_size_gb: float, hardware: HardwareProfile) -> Dict[str, Any]:
+    """Calculate how model memory would be distributed across hardware."""
+    breakdown = {
+        "vram_gb": 0.0,
+        "system_ram_gb": 0.0,
+        "storage_gb": 0.0,
+        "vram_color": "red",
+        "ram_color": "red", 
+        "storage_color": "green",
+        "feasible": False
+    }
+    
+    remaining_size = model_size_gb
+    
+    # GPU VRAM (highest priority)
+    if hardware.can_offload_to_gpu and hardware.available_vram_gb > 0:
+        vram_usage = min(remaining_size, hardware.available_vram_gb * 0.8)  # 80% safety margin
+        breakdown["vram_gb"] = vram_usage
+        remaining_size -= vram_usage
+        
+        # Color based on VRAM usage
+        vram_percentage = vram_usage / (hardware.available_vram_gb * 0.8) if hardware.available_vram_gb > 0 else 1.0
+        if vram_percentage <= 0.7:
+            breakdown["vram_color"] = "green"
+        elif vram_percentage <= 0.9:
+            breakdown["vram_color"] = "yellow"
+        else:
+            breakdown["vram_color"] = "red"
+    
+    # System RAM (second priority)
+    if remaining_size > 0 and hardware.available_ram_gb > 0:
+        ram_usage = min(remaining_size, hardware.available_ram_gb * 0.6)  # 60% safety margin
+        breakdown["system_ram_gb"] = ram_usage
+        remaining_size -= ram_usage
+        
+        # Color based on RAM usage
+        ram_percentage = ram_usage / (hardware.available_ram_gb * 0.6) if hardware.available_ram_gb > 0 else 1.0
+        if ram_percentage <= 0.7:
+            breakdown["ram_color"] = "green"
+        elif ram_percentage <= 0.9:
+            breakdown["ram_color"] = "yellow" 
+        else:
+            breakdown["ram_color"] = "red"
+    
+    # Storage/Swap (last resort)
+    if remaining_size > 0:
+        breakdown["storage_gb"] = remaining_size
+        # Storage is always red (bad for performance)
+        breakdown["storage_color"] = "red"
+    
+    # Model is feasible if no storage/swap needed
+    breakdown["feasible"] = breakdown["storage_gb"] == 0.0
+    
+    return breakdown

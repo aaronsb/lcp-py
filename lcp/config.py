@@ -7,6 +7,7 @@ import toml
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings
 import platformdirs
+from datetime import datetime
 
 
 class ModelPreferences(BaseModel):
@@ -55,6 +56,38 @@ class UIConfig(BaseModel):
     live_markdown_updates: bool = True  # Enable live updating of markdown as it streams
 
 
+class HardwareProfile(BaseModel):
+    """Hardware profile for intelligent model selection."""
+    
+    # System information
+    cpu_cores: int = 0
+    cpu_threads: int = 0
+    cpu_model: str = ""
+    
+    # Memory information
+    system_ram_gb: float = 0.0
+    available_ram_gb: float = 0.0
+    
+    # GPU information  
+    gpu_count: int = 0
+    gpu_models: List[str] = Field(default_factory=list)
+    total_vram_gb: float = 0.0
+    available_vram_gb: float = 0.0
+    
+    # Storage information
+    available_storage_gb: float = 0.0
+    storage_type: str = "unknown"  # SSD, HDD, NVMe, etc.
+    
+    # Profile metadata
+    profile_date: Optional[str] = None
+    platform: str = ""
+    
+    # Computed recommendations
+    recommended_max_model_size_gb: float = 0.0
+    can_offload_to_gpu: bool = False
+    optimal_quantization: str = "Q4_K_M"
+
+
 class LCPConfig(BaseSettings):
     """Main LCP configuration with XDG compliance."""
     
@@ -91,6 +124,9 @@ class LCPConfig(BaseSettings):
     # UI preferences
     ui: UIConfig = Field(default_factory=UIConfig)
     
+    # Hardware profile
+    hardware: HardwareProfile = Field(default_factory=HardwareProfile)
+    
     class Config:
         env_prefix = "LCP_"
         case_sensitive = False
@@ -120,6 +156,8 @@ class ConfigManager:
         if self._config is not None:
             return self._config
         
+        config_needs_save = False
+        
         if self.config_file.exists():
             try:
                 with open(self.config_file, "r") as f:
@@ -128,8 +166,18 @@ class ConfigManager:
             except Exception as e:
                 print(f"Warning: Failed to load config ({e}), using defaults")
                 self._config = LCPConfig()
+                config_needs_save = True
         else:
             self._config = LCPConfig()
+            config_needs_save = True
+        
+        # Auto-profile hardware on first run (if no profile exists)
+        if not self._config.hardware.profile_date:
+            print("🔧 Creating hardware profile for optimal model selection...")
+            self._profile_hardware()
+            config_needs_save = True
+        
+        if config_needs_save:
             self.save_config()
         
         # Smart models directory detection - always run to ensure absolute paths
@@ -191,6 +239,36 @@ class ConfigManager:
                 setattr(config, key, value)
         
         self.save_config()
+    
+    def _profile_hardware(self) -> None:
+        """Profile hardware and update configuration."""
+        from .hardware import create_hardware_profile
+        
+        try:
+            models_dir = None
+            if self._config and self._config.models_dir:
+                models_dir = Path(self._config.models_dir)
+            
+            hardware_profile = create_hardware_profile(models_dir)
+            
+            if self._config:
+                self._config.hardware = hardware_profile
+            
+        except Exception as e:
+            print(f"Warning: Hardware profiling failed ({e}), using defaults")
+    
+    def update_hardware_profile(self) -> HardwareProfile:
+        """Update hardware profile and return it."""
+        self._profile_hardware()
+        if self._config:
+            self.save_config()
+            return self._config.hardware
+        return HardwareProfile()
+    
+    def get_hardware_profile(self) -> HardwareProfile:
+        """Get current hardware profile."""
+        config = self.load_config()
+        return config.hardware
 
 
 # Global config manager instance
