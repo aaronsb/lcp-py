@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import re
 from typing import Optional, AsyncGenerator, Dict, Any
 import httpx
 from rich.console import Console
@@ -9,10 +10,197 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
 from rich.live import Live
+from rich.columns import Columns
 from datetime import datetime
 
 from ..models import ChatMessage, ChatSession
 from ..config import config_manager
+
+
+class LiveStreamingMarkdownRenderer:
+    """Renders markdown with live updating and visual transformation as tokens stream in."""
+    
+    def __init__(self, console: Console, ui_config=None):
+        self.console = console
+        self.buffer = ""
+        self.live_display = None
+        self.last_formatted_state = None  # Track when content changes from plain to formatted
+        
+        # Use provided config or load default
+        if ui_config is None:
+            from ..config import config_manager
+            ui_config = config_manager.load_config().ui
+        
+        self.code_theme = ui_config.markdown_code_theme
+        self.inline_code_theme = ui_config.markdown_inline_code_theme  
+        self.enable_hyperlinks = ui_config.enable_hyperlinks
+        self.enable_tables = ui_config.enable_markdown_tables
+    
+    def start_live_display(self):
+        """Start the live updating display."""
+        self.live_display = Live(
+            Text("", style="dim"),
+            console=self.console,
+            refresh_per_second=10,  # Higher refresh rate for smooth transitions
+            vertical_overflow="visible"
+        )
+        self.live_display.start()
+    
+    def add_content(self, content: str) -> None:
+        """Add new content and update the live display with visual transformation."""
+        self.buffer += content
+        self._update_live_display_with_transformation()
+    
+    def _update_live_display_with_transformation(self) -> None:
+        """Update the live display - let Rich decide what to render."""
+        if not self.live_display:
+            return
+        
+        try:
+            # Let Rich handle all the markdown parsing logic
+            markdown = Markdown(
+                self.buffer,
+                code_theme=self.code_theme,
+                hyperlinks=self.enable_hyperlinks,
+                inline_code_theme=self.inline_code_theme
+            )
+            
+            # Visual feedback on transformation from plain to formatted
+            if self.last_formatted_state != 'formatted':
+                from rich.panel import Panel
+                formatted_panel = Panel(
+                    markdown, 
+                    border_style="bright_green",  # Brief green flash
+                    padding=(0, 1)
+                )
+                self.live_display.update(formatted_panel)
+                self.last_formatted_state = 'formatted'
+            else:
+                self.live_display.update(markdown)
+                
+        except Exception:
+            # Rich couldn't parse it - show as plain text
+            plain_text = Text(self.buffer, style="dim italic")
+            self.live_display.update(plain_text)
+            self.last_formatted_state = 'plain'
+    
+    def finalize(self) -> None:
+        """Stop live display and render final content."""
+        if self.live_display:
+            self.live_display.stop()
+        self.console.print()  # New line after response
+
+
+class StreamingMarkdownRenderer:
+    """Renders markdown incrementally as tokens stream in."""
+    
+    def __init__(self, console: Console, ui_config=None):
+        self.console = console
+        self.buffer = ""
+        self.last_rendered_pos = 0
+        
+        # Use provided config or load default
+        if ui_config is None:
+            from ..config import config_manager
+            ui_config = config_manager.load_config().ui
+        
+        self.code_theme = ui_config.markdown_code_theme
+        self.inline_code_theme = ui_config.markdown_inline_code_theme  
+        self.enable_hyperlinks = ui_config.enable_hyperlinks
+        self.enable_tables = ui_config.enable_markdown_tables
+        
+    def add_content(self, content: str) -> None:
+        """Add new content and render any complete markdown blocks."""
+        self.buffer += content
+        self._render_incremental()
+    
+    def finalize(self) -> None:
+        """Render any remaining content and finish."""
+        if len(self.buffer) > self.last_rendered_pos:
+            remaining = self.buffer[self.last_rendered_pos:]
+            if remaining.strip():
+                # Render final content as markdown with user preferences
+                try:
+                    markdown = Markdown(
+                        remaining.strip(),
+                        code_theme=self.code_theme,
+                        hyperlinks=self.enable_hyperlinks,
+                        inline_code_theme=self.inline_code_theme
+                    )
+                    self.console.print(markdown)
+                except Exception:
+                    # Fallback to plain text if markdown parsing fails
+                    self.console.print(remaining, end="")
+        self.console.print()  # New line after response
+    
+    def _render_incremental(self) -> None:
+        """Render complete markdown blocks from the buffer."""
+        new_content = self.buffer[self.last_rendered_pos:]
+        
+        # Look for complete markdown structures
+        complete_elements = []
+        
+        # 1. Code blocks (```...```)
+        code_block_pattern = r'```[\s\S]*?```'
+        code_blocks = list(re.finditer(code_block_pattern, new_content, re.MULTILINE | re.DOTALL))
+        
+        # 2. Tables (multiple lines with | characters)
+        table_pattern = r'(\|[^\n]*\|\n)+(\|[-:\s|]*\|\n)?(\|[^\n]*\|\n)+'
+        table_blocks = list(re.finditer(table_pattern, new_content, re.MULTILINE))
+        
+        # Combine and sort all matches by position
+        all_matches = []
+        for match in code_blocks:
+            all_matches.append(('code', match))
+        for match in table_blocks:
+            all_matches.append(('table', match))
+        
+        all_matches.sort(key=lambda x: x[1].start())
+        
+        if all_matches:
+            # Found complete markdown elements - render them properly
+            last_end = 0
+            
+            for element_type, match in all_matches:
+                # Render text before this element as plain text
+                before_element = new_content[last_end:match.start()]
+                if before_element:
+                    self.console.print(before_element, end="", highlight=False)
+                
+                # Render the complete element as markdown
+                element_content = match.group(0)
+                
+                # Skip table rendering if disabled
+                if element_type == 'table' and not self.enable_tables:
+                    self.console.print(element_content, end="", highlight=False)
+                    continue
+                
+                try:
+                    markdown = Markdown(
+                        element_content,
+                        code_theme=self.code_theme,
+                        hyperlinks=self.enable_hyperlinks,
+                        inline_code_theme=self.inline_code_theme
+                    )
+                    self.console.print(markdown)
+                except Exception:
+                    # Fallback to plain text for this element
+                    self.console.print(element_content, end="", highlight=False)
+                
+                last_end = match.end()
+            
+            # Update position to after last rendered element
+            self.last_rendered_pos += last_end
+            
+            # Handle remaining content after last element
+            remaining_after_elements = new_content[last_end:]
+            if remaining_after_elements:
+                self.console.print(remaining_after_elements, end="", highlight=False)
+                self.last_rendered_pos = len(self.buffer)
+        else:
+            # No complete markdown blocks yet - render as plain text
+            self.console.print(new_content, end="", highlight=False)
+            self.last_rendered_pos = len(self.buffer)
 
 
 class StreamingChatInterface:
@@ -180,10 +368,17 @@ class StreamingChatInterface:
         
         self.console.print("Assistant: ", style="bold blue", end="")
         
-        # Stream the response
+        # Stream the response with markdown rendering
         response_text = ""
         token_count = 0
         start_time = datetime.now()
+        
+        # Choose renderer based on configuration
+        if self.config.ui.live_markdown_updates:
+            markdown_renderer = LiveStreamingMarkdownRenderer(self.console, self.config.ui)
+            markdown_renderer.start_live_display()
+        else:
+            markdown_renderer = StreamingMarkdownRenderer(self.console, self.config.ui)
         
         try:
             async with self.client.stream(
@@ -216,8 +411,8 @@ class StreamingChatInterface:
                                 response_text += content
                                 token_count += 1
                                 
-                                # Print content as it arrives
-                                self.console.print(content, end="", highlight=False)
+                                # Add content to markdown renderer
+                                markdown_renderer.add_content(content)
                         
                         except json.JSONDecodeError:
                             continue
@@ -226,8 +421,8 @@ class StreamingChatInterface:
             self.console.print(f"[red]\nStreaming error: {e}[/red]")
             return
         
-        # Finish the response
-        self.console.print()  # New line after response
+        # Finalize markdown rendering
+        markdown_renderer.finalize()
         
         # Calculate timing
         duration = datetime.now() - start_time
@@ -242,8 +437,6 @@ class StreamingChatInterface:
         if response_text:
             assistant_msg = ChatMessage.assistant(response_text, token_count)
             self.session.add_message(assistant_msg)
-        
-        self.console.print()  # Extra space before next input
     
     def show_error(self, message: str) -> None:
         """Show an error message."""

@@ -196,18 +196,32 @@ class LCPCore:
             return False
     
     async def check_api_status(self) -> Dict[str, Any]:
-        """Check the status of the llama.cpp API."""
+        """Check the status of the llama.cpp API and get current model info."""
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
                 # Check health endpoint
                 health_response = await client.get(f"{self.config.api.base_url}/health")
                 
                 if health_response.status_code == 200:
-                    return {
+                    status = {
                         "status": "healthy",
                         "api_available": True,
                         "base_url": self.config.api.base_url,
                     }
+                    
+                    # Try to get current model info
+                    try:
+                        models_response = await client.get(f"{self.config.api.base_url}/v1/models")
+                        if models_response.status_code == 200:
+                            models_data = models_response.json()
+                            if "data" in models_data and models_data["data"]:
+                                current_model = models_data["data"][0]
+                                status["current_model"] = current_model.get("id", "unknown")
+                    except Exception:
+                        # Model info not available, but API is still healthy
+                        pass
+                    
+                    return status
                 else:
                     return {
                         "status": "unhealthy",
@@ -234,6 +248,10 @@ class LCPCore:
             if status["api_available"]:
                 self.console.print("✅ [green]API: Available[/green]")
                 self.console.print(f"   [dim]{status['base_url']}[/dim]")
+                
+                # Show currently loaded model if available
+                if "current_model" in status:
+                    self.console.print(f"🤖 [cyan]Loaded Model: {status['current_model']}[/cyan]")
             else:
                 self.console.print("❌ [red]API: Unavailable[/red]")
                 self.console.print(f"   [red]{status.get('error', 'Unknown error')}[/red]")

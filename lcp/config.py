@@ -46,13 +46,20 @@ class UIConfig(BaseModel):
     chat_history_length: int = 100
     show_token_count: bool = True
     show_timing: bool = True
+    
+    # Markdown rendering options
+    markdown_code_theme: str = "monokai"  # Syntax highlighting theme for code blocks
+    markdown_inline_code_theme: str = "monokai"  # Theme for inline code
+    enable_hyperlinks: bool = True  # Enable clickable links in markdown
+    enable_markdown_tables: bool = True  # Enable table rendering
+    live_markdown_updates: bool = True  # Enable live updating of markdown as it streams
 
 
 class LCPConfig(BaseSettings):
     """Main LCP configuration with XDG compliance."""
     
     # Model management
-    models_dir: Path = Field(default_factory=lambda: Path("./models"))
+    models_dir: Path = Field(default_factory=lambda: Path.cwd() / "models")
     model_preferences: ModelPreferences = Field(default_factory=ModelPreferences)
     
     # Backends
@@ -125,10 +132,33 @@ class ConfigManager:
             self._config = LCPConfig()
             self.save_config()
         
-        # Update models_dir to use XDG data dir if it's still default
-        if str(self._config.models_dir) == "./models":
-            self._config.models_dir = self.data_dir / "models"
+        # Smart models directory detection - always run to ensure absolute paths
+        if not self._config.models_dir.is_absolute() or str(self._config.models_dir) in ["./models", "models"]:
+            # Try to find existing models directory
+            potential_dirs = [
+                Path.cwd() / "models",  # Current directory
+                Path.cwd().parent / "models",  # Parent directory (for lcp-py subdir)  
+                Path.home() / "Projects/docker/north/llamacpp/models",  # Common project location
+                self.data_dir / "models",  # XDG data dir
+            ]
+            
+            models_dir_found = False
+            for potential_dir in potential_dirs:
+                if potential_dir.exists() and any(potential_dir.glob("*.gguf")):
+                    self._config.models_dir = potential_dir.resolve()  # Make absolute
+                    models_dir_found = True
+                    break
+            
+            # If no existing models found, use XDG data dir (global location)
+            if not models_dir_found:
+                self._config.models_dir = self.data_dir / "models"
+            
+            # Ensure absolute path and directory exists
+            self._config.models_dir = self._config.models_dir.resolve()
             self._config.models_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Save the updated config with absolute path
+            self.save_config()
         
         return self._config
     
