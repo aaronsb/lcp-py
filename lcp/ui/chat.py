@@ -122,12 +122,13 @@ class LiveStreamingMarkdownRenderer:
         self.enable_tables = ui_config.enable_markdown_tables
     
     def start_live_display(self):
-        """Start the live updating display."""
+        """Start the live updating display with transient mode for clean scrollback."""
         self.live_display = Live(
             Text("", style="dim"),
             console=self.console,
             refresh_per_second=10,  # Higher refresh rate for smooth transitions
-            vertical_overflow="visible"
+            vertical_overflow="visible",
+            transient=True  # Make display disappear on exit to keep scrollback clean
         )
         self.live_display.start()
     
@@ -170,9 +171,25 @@ class LiveStreamingMarkdownRenderer:
             self.last_formatted_state = 'plain'
     
     def finalize(self) -> None:
-        """Stop live display and render final content."""
+        """Stop transient live display and render final formatted content."""
         if self.live_display:
-            self.live_display.stop()
+            self.live_display.stop()  # This will make the transient display disappear
+        
+        # Now render the final formatted content to the permanent scrollback
+        if self.buffer.strip():
+            try:
+                from rich.markdown import Markdown
+                markdown = Markdown(
+                    self.buffer,
+                    code_theme=self.code_theme,
+                    hyperlinks=self.enable_hyperlinks,
+                    inline_code_theme=self.inline_code_theme
+                )
+                self.console.print(markdown)
+            except Exception:
+                # Fallback to plain text if markdown parsing fails
+                self.console.print(Text(self.buffer, style="default"))
+        
         self.console.print()  # New line after response
 
 
