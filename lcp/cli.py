@@ -64,29 +64,10 @@ def search(query: str, limit: int):
             console.print(f"    [dim]{model.repo_id}/{model.filename}[/dim]")
             
             if model.size_gb:
-                # Calculate memory breakdown
-                from .hardware import get_model_memory_breakdown
-                breakdown = get_model_memory_breakdown(model.size_gb, hardware)
-                
-                # Build memory breakdown display
-                memory_parts = []
-                if breakdown["vram_gb"] > 0:
-                    color = breakdown["vram_color"]
-                    memory_parts.append(f"[{color}]{breakdown['vram_gb']:.1f}GB VRAM[/{color}]")
-                
-                if breakdown["system_ram_gb"] > 0:
-                    color = breakdown["ram_color"] 
-                    memory_parts.append(f"[{color}]{breakdown['system_ram_gb']:.1f}GB RAM[/{color}]")
-                
-                if breakdown["storage_gb"] > 0:
-                    color = breakdown["storage_color"]
-                    memory_parts.append(f"[{color}]{breakdown['storage_gb']:.1f}GB Storage[/{color}]")
-                
-                # Show total size and breakdown
-                feasible_icon = "✅" if breakdown["feasible"] else "⚠️"
-                memory_breakdown = " + ".join(memory_parts) if memory_parts else f"[green]{model.size_gb:.1f} GB[/green]"
-                
-                console.print(f"    {feasible_icon} {memory_breakdown}")
+                # Create visual memory usage bar
+                from .hardware import create_memory_usage_bar
+                memory_bar = create_memory_usage_bar(model.size_gb, hardware, width=30, enable_storage=False)
+                console.print(f"    {memory_bar} {model.size_gb:.1f} GB")
             console.print()
     
     asyncio.run(run_search())
@@ -310,18 +291,53 @@ def hwprofile_show():
 
 
 @hwprofile.command('update')
-def hwprofile_update():
+@click.option('--stop-service/--keep-service', default=False, 
+              help='Stop llamacpp service during profiling for accurate GPU memory detection')
+def hwprofile_update(stop_service: bool):
     """Update hardware profile with current system information."""
-    with console.status("🔧 Profiling hardware...", spinner="dots"):
-        profile = config_manager.update_hardware_profile()
+    from .docker_manager import docker_manager
     
-    console.print("[green]✅ Hardware profile updated![/green]")
-    console.print()
+    service_was_running = False
     
-    # Show key changes
-    console.print(f"Max recommended model size: [green]{profile.recommended_max_model_size_gb:.1f} GB[/green]")
-    console.print(f"GPU offloading: [green]{'Available' if profile.can_offload_to_gpu else 'Not available'}[/green]")
-    console.print(f"Optimal quantization: [cyan]{profile.optimal_quantization}[/cyan]")
+    if stop_service and docker_manager.is_configured():
+        # Check if service is running
+        status = docker_manager.get_service_status()
+        service_was_running = status.get('running', False)
+        
+        if service_was_running:
+            console.print("🛑 Stopping llamacpp service for accurate GPU profiling...")
+            docker_manager.stop_service()
+            console.print("   Waiting for GPU memory to be released...")
+            import time
+            time.sleep(3)  # Give time for GPU memory to be released
+    
+    try:
+        with console.status("🔧 Profiling hardware...", spinner="dots"):
+            profile = config_manager.update_hardware_profile()
+        
+        console.print("[green]✅ Hardware profile updated![/green]")
+        console.print()
+        
+        # Show key changes
+        console.print(f"Max recommended model size: [green]{profile.recommended_max_model_size_gb:.1f} GB[/green]")
+        console.print(f"GPU offloading: [green]{'Available' if profile.can_offload_to_gpu else 'Not available'}[/green]")
+        console.print(f"Optimal quantization: [cyan]{profile.optimal_quantization}[/cyan]")
+        
+        if profile.can_offload_to_gpu:
+            console.print(f"Available VRAM: [green]{profile.available_vram_gb:.1f} GB[/green] of {profile.total_vram_gb:.1f} GB total")
+    
+    finally:
+        # Restart service if it was running before
+        if stop_service and service_was_running and docker_manager.is_configured():
+            console.print()
+            console.print("🚀 Restarting llamacpp service...")
+            docker_manager.start_service()
+
+
+@config.command('edit')
+def config_edit():
+    """Edit configuration file."""
+    import subprocess
     import os
     
     config_file = config_manager.config_file
@@ -338,6 +354,119 @@ def hwprofile_update():
         console.print(f"[green]✅ Configuration updated[/green]")
     except (subprocess.CalledProcessError, FileNotFoundError):
         console.print(f"[yellow]Could not open editor. Edit manually: {config_file}[/yellow]")
+
+
+@config.group()
+def docker():
+    """Docker Compose service management."""
+    pass
+
+
+@docker.command('setup')
+@click.argument('compose_dir', type=click.Path(exists=True, file_okay=False, dir_okay=True))
+@click.option('--service-name', '-s', default='llamacpp', help='Service name in docker-compose.yml')
+@click.option('--auto-manage/--no-auto-manage', default=False, help='Automatically manage service')
+def docker_setup(compose_dir: str, service_name: str, auto_manage: bool):
+    """Setup Docker Compose integration."""
+    from pathlib import Path
+    
+    compose_path = Path(compose_dir).resolve()
+    compose_file = compose_path / "docker-compose.yml"
+    
+    if not compose_file.exists():
+        console.print(f"[red]docker-compose.yml not found in {compose_path}[/red]")
+        return
+    
+    # Update config
+    config = config_manager.load_config()
+    config.docker.compose_dir = str(compose_path)
+    config.docker.service_name = service_name
+    config.docker.auto_manage = auto_manage
+    
+    config_manager._config = config
+    config_manager.save_config()
+    
+    console.print(f"✅ Docker Compose integration configured")
+    console.print(f"   Directory: [cyan]{compose_path}[/cyan]")
+    console.print(f"   Service: [cyan]{service_name}[/cyan]")
+    console.print(f"   Auto-manage: [cyan]{'enabled' if auto_manage else 'disabled'}[/cyan]")
+
+
+@docker.command('status')
+def docker_status():
+    """Show Docker service status."""
+    from .docker_manager import docker_manager
+    
+    if not docker_manager.is_configured():
+        console.print("[red]Docker Compose not configured. Run: lcp config docker setup <path>[/red]")
+        return
+    
+    status = docker_manager.get_service_status()
+    service_name = status.get('service_name', 'llamacpp')
+    
+    console.print(f"\n🐳 [bold]Docker Service Status:[/bold]")
+    console.print(f"   Service: [cyan]{service_name}[/cyan]")
+    
+    if status.get('error'):
+        console.print(f"   Status: [red]Error - {status['error']}[/red]")
+    elif status.get('running'):
+        console.print(f"   Status: [green]Running[/green]")
+        console.print(f"   Container: [cyan]{status.get('container_name', 'unknown')}[/cyan]")
+        if status.get('ports'):
+            console.print(f"   Ports: [cyan]{status.get('ports')}[/cyan]")
+    else:
+        console.print(f"   Status: [yellow]Stopped[/yellow]")
+
+
+@docker.command('start')
+def docker_start():
+    """Start the llamacpp service."""
+    from .docker_manager import docker_manager
+    
+    if not docker_manager.is_configured():
+        console.print("[red]Docker Compose not configured. Run: lcp config docker setup <path>[/red]")
+        return
+    
+    docker_manager.start_service()
+
+
+@docker.command('stop') 
+def docker_stop():
+    """Stop the llamacpp service."""
+    from .docker_manager import docker_manager
+    
+    if not docker_manager.is_configured():
+        console.print("[red]Docker Compose not configured. Run: lcp config docker setup <path>[/red]")
+        return
+    
+    docker_manager.stop_service()
+
+
+@docker.command('restart')
+def docker_restart():
+    """Restart the llamacpp service."""
+    from .docker_manager import docker_manager
+    
+    if not docker_manager.is_configured():
+        console.print("[red]Docker Compose not configured. Run: lcp config docker setup <path>[/red]")
+        return
+    
+    docker_manager.restart_service()
+
+
+@docker.command('logs')
+@click.option('--lines', '-n', default=20, help='Number of log lines to show')
+def docker_logs(lines: int):
+    """Show service logs."""
+    from .docker_manager import docker_manager
+    
+    if not docker_manager.is_configured():
+        console.print("[red]Docker Compose not configured. Run: lcp config docker setup <path>[/red]")
+        return
+    
+    console.print(f"\n📋 [bold]Service Logs (last {lines} lines):[/bold]")
+    logs = docker_manager.get_service_logs(lines=lines)
+    console.print(logs)
 
 
 def main():

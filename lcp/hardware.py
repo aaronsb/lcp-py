@@ -235,3 +235,83 @@ def get_model_memory_breakdown(model_size_gb: float, hardware: HardwareProfile) 
     breakdown["feasible"] = breakdown["storage_gb"] == 0.0
     
     return breakdown
+
+
+def create_memory_usage_bar(model_size_gb: float, hardware: HardwareProfile, width: int = 30, enable_storage: bool = False) -> str:
+    """Create a visual memory usage bar graph using Rich markup.
+    
+    The bar represents the total available memory pool. Each character represents 
+    an equal portion of the total memory (VRAM + CPU RAM + optionally SSD RAM).
+    """
+    
+    # Calculate available memory pools
+    vram_available = hardware.available_vram_gb * 0.8 if hardware.can_offload_to_gpu else 0.0
+    ram_available = hardware.available_ram_gb * 0.6
+    storage_available = 50.0 if enable_storage else 0.0  # Configurable storage allocation
+    
+    # Total available memory pool
+    total_available = vram_available + ram_available + (storage_available if enable_storage else 0)
+    
+    if total_available <= 0:
+        return "[red]No memory available[/red]".ljust(width)
+    
+    # Get memory breakdown for this model
+    breakdown = get_model_memory_breakdown(model_size_gb, hardware)
+    
+    # Check if model fits in available memory
+    total_needed = breakdown["vram_gb"] + breakdown["system_ram_gb"] + breakdown["storage_gb"]
+    if total_needed > total_available:
+        return "[red]Insufficient RAM[/red]".ljust(width)
+    
+    # Calculate characters per memory type (proportional to available memory)
+    gb_per_char = total_available / width
+    
+    vram_total_chars = int(vram_available / gb_per_char) if vram_available > 0 else 0
+    ram_total_chars = int(ram_available / gb_per_char) if ram_available > 0 else 0
+    storage_total_chars = int(storage_available / gb_per_char) if enable_storage and storage_available > 0 else 0
+    
+    # Calculate used characters for each memory type
+    vram_used_chars = int(breakdown["vram_gb"] / gb_per_char) if breakdown["vram_gb"] > 0 else 0
+    ram_used_chars = int(breakdown["system_ram_gb"] / gb_per_char) if breakdown["system_ram_gb"] > 0 else 0
+    storage_used_chars = int(breakdown["storage_gb"] / gb_per_char) if breakdown["storage_gb"] > 0 else 0
+    
+    # Ensure we don't exceed available characters for each type
+    vram_used_chars = min(vram_used_chars, vram_total_chars)
+    ram_used_chars = min(ram_used_chars, ram_total_chars) 
+    storage_used_chars = min(storage_used_chars, storage_total_chars)
+    
+    # Build the bar character by character
+    bar = []
+    
+    # VRAM section (green)
+    for i in range(vram_total_chars):
+        if i < vram_used_chars:
+            bar.append("[on green] [/on green]")  # Used VRAM: green background
+        else:
+            bar.append("[green]░[/green]")  # Available VRAM: green outline
+    
+    # CPU RAM section (yellow/orange)
+    for i in range(ram_total_chars):
+        if i < ram_used_chars:
+            bar.append("[on yellow] [/on yellow]")  # Used RAM: yellow background
+        else:
+            bar.append("[yellow]░[/yellow]")  # Available RAM: yellow outline
+    
+    # Storage section (red) - only if enabled
+    if enable_storage:
+        for i in range(storage_total_chars):
+            if i < storage_used_chars:
+                bar.append("[on red] [/on red]")  # Used storage: red background
+            else:
+                bar.append("[red]░[/red]")  # Available storage: red outline
+    
+    # Ensure exactly 30 characters
+    current_length = len(bar)
+    if current_length < width:
+        # Fill remaining with dim dots
+        bar.extend(["[dim]·[/dim]"] * (width - current_length))
+    elif current_length > width:
+        # Truncate if somehow too long
+        bar = bar[:width]
+    
+    return "".join(bar)

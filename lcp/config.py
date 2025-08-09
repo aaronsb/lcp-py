@@ -53,7 +53,14 @@ class UIConfig(BaseModel):
     markdown_inline_code_theme: str = "monokai"  # Theme for inline code
     enable_hyperlinks: bool = True  # Enable clickable links in markdown
     enable_markdown_tables: bool = True  # Enable table rendering
-    live_markdown_updates: bool = True  # Enable live updating of markdown as it streams
+
+
+class DockerConfig(BaseModel):
+    """Docker Compose service management."""
+    
+    compose_dir: Optional[str] = None  # Directory containing docker-compose.yml
+    service_name: str = "llamacpp"  # Service name in docker-compose.yml
+    auto_manage: bool = False  # Automatically start/stop service as needed
 
 
 class HardwareProfile(BaseModel):
@@ -123,6 +130,9 @@ class LCPConfig(BaseSettings):
     
     # UI preferences
     ui: UIConfig = Field(default_factory=UIConfig)
+    
+    # Docker Compose service management
+    docker: DockerConfig = Field(default_factory=DockerConfig)
     
     # Hardware profile
     hardware: HardwareProfile = Field(default_factory=HardwareProfile)

@@ -17,6 +17,91 @@ from ..models import ChatMessage, ChatSession
 from ..config import config_manager
 
 
+class CleanScrollbackMarkdownRenderer:
+    """Renders markdown with real-time updates but clean scrollback using in-place overwrites."""
+    
+    def __init__(self, console: Console, ui_config=None):
+        self.console = console
+        self.buffer = ""
+        self.displayed_lines = 0
+        self.update_threshold = 3  # Update every N tokens for smooth rendering
+        self.token_count = 0
+        
+        # Use provided config or load default
+        if ui_config is None:
+            from ..config import config_manager
+            ui_config = config_manager.load_config().ui
+        
+        self.code_theme = ui_config.markdown_code_theme
+        self.inline_code_theme = ui_config.markdown_inline_code_theme  
+        self.enable_hyperlinks = ui_config.enable_hyperlinks
+        self.enable_tables = ui_config.enable_markdown_tables
+    
+    def start_live_display(self):
+        """Initialize display."""
+        pass
+    
+    def add_content(self, content: str) -> None:
+        """Add content and update display with clean scrollback."""
+        self.buffer += content
+        self.token_count += 1
+        
+        # Update display every few tokens
+        if self.token_count % self.update_threshold == 0:
+            self._update_display()
+    
+    def _update_display(self) -> None:
+        """Update the display by overwriting the current output area."""
+        if not self.buffer.strip():
+            return
+        
+        # Move cursor back to overwrite previous output
+        if self.displayed_lines > 0:
+            # Move cursor up by number of displayed lines
+            self.console.file.write(f"\033[{self.displayed_lines}A")
+            # Clear from cursor to end of screen
+            self.console.file.write("\033[J")
+            self.console.file.flush()
+        
+        # Render current markdown
+        try:
+            markdown = Markdown(
+                self.buffer,
+                code_theme=self.code_theme,
+                hyperlinks=self.enable_hyperlinks,
+                inline_code_theme=self.inline_code_theme
+            )
+            
+            # Capture the rendered output to count lines
+            from io import StringIO
+            import sys
+            
+            # Temporarily redirect console output to count lines
+            temp_console = Console(file=StringIO(), width=self.console.size.width)
+            temp_console.print(markdown, end="")
+            rendered_output = temp_console.file.getvalue()
+            
+            # Count actual display lines (accounting for wrapping)
+            self.displayed_lines = rendered_output.count('\n')
+            if rendered_output and not rendered_output.endswith('\n'):
+                self.displayed_lines += 1
+            
+            # Print the actual output
+            self.console.print(markdown, end="")
+            
+        except Exception:
+            # Fallback to plain text if markdown parsing fails
+            text_output = Text(self.buffer, style="default")
+            self.console.print(text_output, end="")
+            self.displayed_lines = self.buffer.count('\n') + (1 if self.buffer and not self.buffer.endswith('\n') else 0)
+    
+    def finalize(self) -> None:
+        """Finalize the output - ensure final render and add newline."""
+        # Do final update to ensure everything is rendered
+        self._update_display()
+        self.console.print()  # Add final newline
+
+
 class LiveStreamingMarkdownRenderer:
     """Renders markdown with live updating and visual transformation as tokens stream in."""
     
@@ -91,13 +176,12 @@ class LiveStreamingMarkdownRenderer:
         self.console.print()  # New line after response
 
 
-class StreamingMarkdownRenderer:
-    """Renders markdown incrementally as tokens stream in."""
+class FinalRenderMarkdownRenderer:
+    """Simple, proven pattern: plain text during streaming, markdown after completion."""
     
     def __init__(self, console: Console, ui_config=None):
         self.console = console
         self.buffer = ""
-        self.last_rendered_pos = 0
         
         # Use provided config or load default
         if ui_config is None:
@@ -110,97 +194,31 @@ class StreamingMarkdownRenderer:
         self.enable_tables = ui_config.enable_markdown_tables
         
     def add_content(self, content: str) -> None:
-        """Add new content and render any complete markdown blocks."""
+        """Show plain text tokens as they arrive - clean and fast."""
         self.buffer += content
-        self._render_incremental()
+        # Simply print the new token - no formatting, no complexity
+        self.console.print(content, end="", highlight=False)
     
     def finalize(self) -> None:
-        """Render any remaining content and finish."""
-        if len(self.buffer) > self.last_rendered_pos:
-            remaining = self.buffer[self.last_rendered_pos:]
-            if remaining.strip():
-                # Render final content as markdown with user preferences
-                try:
-                    markdown = Markdown(
-                        remaining.strip(),
-                        code_theme=self.code_theme,
-                        hyperlinks=self.enable_hyperlinks,
-                        inline_code_theme=self.inline_code_theme
-                    )
-                    self.console.print(markdown)
-                except Exception:
-                    # Fallback to plain text if markdown parsing fails
-                    self.console.print(remaining, end="")
-        self.console.print()  # New line after response
-    
-    def _render_incremental(self) -> None:
-        """Render complete markdown blocks from the buffer."""
-        new_content = self.buffer[self.last_rendered_pos:]
-        
-        # Look for complete markdown structures
-        complete_elements = []
-        
-        # 1. Code blocks (```...```)
-        code_block_pattern = r'```[\s\S]*?```'
-        code_blocks = list(re.finditer(code_block_pattern, new_content, re.MULTILINE | re.DOTALL))
-        
-        # 2. Tables (multiple lines with | characters)
-        table_pattern = r'(\|[^\n]*\|\n)+(\|[-:\s|]*\|\n)?(\|[^\n]*\|\n)+'
-        table_blocks = list(re.finditer(table_pattern, new_content, re.MULTILINE))
-        
-        # Combine and sort all matches by position
-        all_matches = []
-        for match in code_blocks:
-            all_matches.append(('code', match))
-        for match in table_blocks:
-            all_matches.append(('table', match))
-        
-        all_matches.sort(key=lambda x: x[1].start())
-        
-        if all_matches:
-            # Found complete markdown elements - render them properly
-            last_end = 0
+        """Render the complete response as beautiful markdown."""
+        if self.buffer.strip():
+            # Add some visual separation
+            self.console.print("\n" + "─" * 50)
             
-            for element_type, match in all_matches:
-                # Render text before this element as plain text
-                before_element = new_content[last_end:match.start()]
-                if before_element:
-                    self.console.print(before_element, end="", highlight=False)
-                
-                # Render the complete element as markdown
-                element_content = match.group(0)
-                
-                # Skip table rendering if disabled
-                if element_type == 'table' and not self.enable_tables:
-                    self.console.print(element_content, end="", highlight=False)
-                    continue
-                
-                try:
-                    markdown = Markdown(
-                        element_content,
-                        code_theme=self.code_theme,
-                        hyperlinks=self.enable_hyperlinks,
-                        inline_code_theme=self.inline_code_theme
-                    )
-                    self.console.print(markdown)
-                except Exception:
-                    # Fallback to plain text for this element
-                    self.console.print(element_content, end="", highlight=False)
-                
-                last_end = match.end()
-            
-            # Update position to after last rendered element
-            self.last_rendered_pos += last_end
-            
-            # Handle remaining content after last element
-            remaining_after_elements = new_content[last_end:]
-            if remaining_after_elements:
-                self.console.print(remaining_after_elements, end="", highlight=False)
-                self.last_rendered_pos = len(self.buffer)
-        else:
-            # No complete markdown blocks yet - render as plain text
-            self.console.print(new_content, end="", highlight=False)
-            self.last_rendered_pos = len(self.buffer)
+            # Now render the complete response as proper markdown
+            try:
+                markdown = Markdown(
+                    self.buffer.strip(),
+                    code_theme=self.code_theme,
+                    hyperlinks=self.enable_hyperlinks,
+                    inline_code_theme=self.inline_code_theme
+                )
+                self.console.print(markdown)
+            except Exception:
+                # Fallback to plain text if markdown parsing fails
+                self.console.print(Text(self.buffer.strip(), style="default"))
+        
+        self.console.print()  # Final newline
 
 
 class StreamingChatInterface:
@@ -373,12 +391,9 @@ class StreamingChatInterface:
         token_count = 0
         start_time = datetime.now()
         
-        # Choose renderer based on configuration
-        if self.config.ui.live_markdown_updates:
-            markdown_renderer = LiveStreamingMarkdownRenderer(self.console, self.config.ui)
-            markdown_renderer.start_live_display()
-        else:
-            markdown_renderer = StreamingMarkdownRenderer(self.console, self.config.ui)
+        # Use live markdown rendering with optimized updates to reduce scrollback pollution
+        markdown_renderer = LiveStreamingMarkdownRenderer(self.console, self.config.ui)
+        markdown_renderer.start_live_display()
         
         try:
             async with self.client.stream(
