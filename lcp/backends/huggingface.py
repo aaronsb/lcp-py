@@ -248,7 +248,7 @@ class HuggingFaceBackend(Backend):
         if not model_info.download_url:
             raise ValueError("No download URL available for model")
         
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(follow_redirects=True) as client:
             async with client.stream("GET", model_info.download_url) as response:
                 response.raise_for_status()
                 

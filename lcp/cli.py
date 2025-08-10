@@ -60,8 +60,10 @@ def search(query: str, limit: int):
         hardware = config_manager.get_hardware_profile()
         
         for i, model in enumerate(models, 1):
+            # Show display name for readability
             console.print(f"{i:2d}. [cyan]{model.display_name}[/cyan]")
-            console.print(f"    [dim]{model.repo_id}/{model.filename}[/dim]")
+            # Show copyable identifier
+            console.print(f"    [bold white]{model.model_id}[/bold white]")
             
             if model.size_gb:
                 # Create visual memory usage bar
@@ -76,14 +78,34 @@ def search(query: str, limit: int):
 @cli.command()
 @click.argument('model_name')
 def download(model_name: str):
-    """Download a specific model."""
+    """Download a specific model.
+    
+    Examples:
+        lcp download phi-3.5-mini
+        lcp download bartowski/phi-4-GGUF/phi-4-IQ2_M.gguf
+    """
     async def run_download():
         with console.status(f"🔍 Finding model '{model_name}'...", spinner="dots"):
             model_info = await core.get_model(model_name)
         
         if not model_info:
             console.print(f"[red]Model not found: {model_name}[/red]")
-            console.print("Try: [bold]lcp search <query>[/bold] to find available models")
+            console.print()
+            
+            # Try to search for similar models
+            console.print("[yellow]Searching for similar models...[/yellow]")
+            search_results = await core.search_models(model_name, limit=5)
+            
+            if search_results:
+                console.print("\n[bold]Did you mean one of these?[/bold]\n")
+                for i, model in enumerate(search_results, 1):
+                    console.print(f"{i}. {model.display_name}")
+                    console.print(f"   [bold white]{model.model_id}[/bold white]")
+                console.print()
+                console.print("[bold]To download, copy and paste the model ID:[/bold]")
+                console.print(f"  lcp download {search_results[0].model_id}")
+            else:
+                console.print("Try: [bold]lcp search <query>[/bold] to find available models")
             return
         
         console.print(f"[blue]Found: {model_info.display_name}[/blue]")

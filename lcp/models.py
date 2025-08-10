@@ -136,6 +136,12 @@ class ModelInfo:
         return " ".join(parts)
     
     @property
+    def model_id(self) -> str:
+        """Get a copyable model identifier (uses underscores instead of spaces)."""
+        # Use the full path as the identifier
+        return f"{self.repo_id}/{self.filename}"
+    
+    @property
     def is_local(self) -> bool:
         """Check if model is downloaded locally."""
         return self.local_path is not None and self.local_path.exists()
