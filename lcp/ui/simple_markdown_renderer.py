@@ -1,26 +1,26 @@
-"""Simple Progressive Markdown Renderer
+"""Rich Live Streaming Markdown Renderer
 
-Instead of trying to recreate Rich's markdown parsing, this approach uses
-simple heuristics to detect "logical blocks" and lets Rich handle all 
-the complex markdown parsing.
+Uses Rich's canonical Live display pattern for streaming markdown,
+based on the proven Pydantic AI implementation.
 """
 
-import re
 from rich.console import Console
 from rich.markdown import Markdown
+from rich.live import Live
+from rich.text import Text
 
 
-class SimpleProgressiveRenderer:
-    """Simple approach: accumulate content and render complete logical sections.
+class RichLiveStreamingRenderer:
+    """Uses Rich's Live display for streaming markdown - the canonical approach.
     
-    Uses basic heuristics to detect when we have "enough" content to render
-    a meaningful section, then lets Rich handle all the markdown complexity.
+    Based on Pydantic AI's proven pattern: accumulate content in buffer
+    and update Live display with complete markdown on each token.
     """
     
     def __init__(self, console: Console, ui_config=None):
         self.console = console
         self.buffer = ""
-        self.last_rendered_pos = 0
+        self.live_display = None
         
         # Use provided config or load default
         if ui_config is None:
@@ -33,127 +33,65 @@ class SimpleProgressiveRenderer:
         self.enable_tables = ui_config.enable_markdown_tables
     
     def start_live_display(self):
-        """Initialize - no setup needed."""
-        pass
+        """Start Live display for streaming markdown updates."""
+        self.live_display = Live(
+            Text("", style="dim"),
+            console=self.console,
+            refresh_per_second=4,  # Reasonable refresh rate
+            vertical_overflow="visible"
+        )
+        self.live_display.start()
     
     def add_content(self, content: str) -> None:
-        """Add content and render when we detect logical completion points."""
+        """Add content and update Live display - Pydantic AI pattern."""
         self.buffer += content
         
-        # Check for logical completion points
-        if self._should_render_section():
-            self._render_new_section()
-    
-    def _should_render_section(self) -> bool:
-        """Simple heuristics to detect when we have a complete section."""
-        new_content = self.buffer[self.last_rendered_pos:]
-        
-        # Render on paragraph breaks (double newline)
-        if '\n\n' in new_content:
-            return True
-        
-        # Render when we have a substantial amount of content
-        if len(new_content.strip()) > 200:
-            return True
-        
-        # Render on certain markdown boundaries
-        lines = new_content.split('\n')
-        for line in lines:
-            # Headers, code fences, horizontal rules
-            if (line.startswith('#') or 
-                line.startswith('```') or 
-                line.startswith('---') or
-                re.match(r'^\|.*\|', line)):  # Table rows
-                return True
-        
-        return False
-    
-    def _render_new_section(self) -> None:
-        """Render new content since last render point."""
-        new_content = self.buffer[self.last_rendered_pos:]
-        
-        # Find a good breaking point (paragraph boundary, etc.)
-        break_point = self._find_break_point(new_content)
-        
-        if break_point > 0:
-            content_to_render = new_content[:break_point]
-            
-            # Let Rich handle all the markdown parsing
+        if self.live_display and self.buffer.strip():
             try:
+                # Render complete buffer as markdown - let Rich handle everything
                 markdown = Markdown(
-                    content_to_render,
+                    self.buffer,
                     code_theme=self.code_theme,
                     hyperlinks=self.enable_hyperlinks,
                     inline_code_theme=self.inline_code_theme
                 )
-                self.console.print(markdown)
+                # This is the key pattern from Pydantic AI: live.update(Markdown(message))
+                self.live_display.update(markdown)
                 
             except Exception:
-                # Fallback to plain text
-                from rich.text import Text
-                plain_text = Text(content_to_render, style="default")
-                self.console.print(plain_text)
-            
-            self.last_rendered_pos += break_point
-    
-    def _find_break_point(self, content: str) -> int:
-        """Find a good place to break content for rendering."""
-        # Look for paragraph breaks first
-        double_newline = content.find('\n\n')
-        if double_newline != -1:
-            return double_newline + 2
-        
-        # Look for single logical breaks
-        lines = content.split('\n')
-        pos = 0
-        
-        for i, line in enumerate(lines):
-            line_end = pos + len(line) + 1  # +1 for newline
-            
-            # Break after headers
-            if line.startswith('#'):
-                return line_end
-            
-            # Break after horizontal rules
-            if line.startswith('---') or line.startswith('***'):
-                return line_end
-            
-            # Break after code fence closures
-            if line.startswith('```') and i > 0:
-                return line_end
-            
-            pos = line_end
-        
-        # If no logical break found, return all content
-        return len(content)
+                # Fallback to plain text if markdown parsing fails
+                plain_text = Text(self.buffer, style="default")
+                self.live_display.update(plain_text)
     
     def finalize(self) -> None:
-        """Render any remaining content."""
-        if self.last_rendered_pos < len(self.buffer):
-            remaining = self.buffer[self.last_rendered_pos:]
+        """Stop Live display and ensure final content is in scrollback."""
+        if self.live_display:
+            # Stop the live display
+            self.live_display.stop()
             
-            try:
-                markdown = Markdown(
-                    remaining,
-                    code_theme=self.code_theme,
-                    hyperlinks=self.enable_hyperlinks,
-                    inline_code_theme=self.inline_code_theme
-                )
-                self.console.print(markdown)
-                
-            except Exception:
-                from rich.text import Text
-                plain_text = Text(remaining, style="default")
-                self.console.print(plain_text)
-        
-        self.console.print()  # Final newline
+            # Print final content to permanent scrollback
+            if self.buffer.strip():
+                try:
+                    markdown = Markdown(
+                        self.buffer,
+                        code_theme=self.code_theme,
+                        hyperlinks=self.enable_hyperlinks,
+                        inline_code_theme=self.inline_code_theme
+                    )
+                    self.console.print(markdown)
+                    
+                except Exception:
+                    plain_text = Text(self.buffer, style="default")
+                    self.console.print(plain_text)
+            
+            self.console.print()  # Final newline
 
 
 class StreamingMarkdownRenderer:
     """Wrapper to maintain API compatibility."""
     
     def __init__(self, console: Console, ui_config=None):
-        self.renderer = SimpleProgressiveRenderer(console, ui_config)
+        self.renderer = RichLiveStreamingRenderer(console, ui_config)
     
     def start_live_display(self):
         return self.renderer.start_live_display()
