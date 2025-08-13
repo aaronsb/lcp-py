@@ -30,6 +30,7 @@ dependencies = [
     "pydantic>=2.0.0",
     "pydantic-settings>=2.0.0",
     "toml>=0.10.0",
+    "pyyaml>=6.0.0",
     "fuzzywuzzy>=0.18.0",
     "python-levenshtein>=0.20.0",
     "tqdm>=4.65.0",

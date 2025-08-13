@@ -61,6 +61,8 @@ class DockerConfig(BaseModel):
     compose_dir: Optional[str] = None  # Directory containing docker-compose.yml
     service_name: str = "llamacpp"  # Service name in docker-compose.yml
     auto_manage: bool = False  # Automatically start/stop service as needed
+    gpu_strategy: str = "auto-maximize"  # GPU strategy: "gpu-only", "cpu-only", "auto-maximize", "auto-percentage"
+    gpu_vram_percentage: int = 80  # For "auto-percentage" strategy, percentage of VRAM to use
 
 
 class HardwareProfile(BaseModel):
@@ -160,6 +162,12 @@ class ConfigManager:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         
         self._config: Optional[LCPConfig] = None
+    
+    def get_config(self) -> LCPConfig:
+        """Get the current configuration, loading if necessary."""
+        if self._config is None:
+            self.load_config()
+        return self._config
     
     def load_config(self) -> LCPConfig:
         """Load configuration from file or create default."""

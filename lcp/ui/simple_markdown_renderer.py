@@ -119,41 +119,14 @@ class UnifiedStreamingRenderer:
                 self.live_display.update(plain_text)
     
     def finalize(self) -> None:
-        """Stop Live display and ensure final content is in scrollback."""
+        """Stop Live display - content is already visible."""
         if self.live_display:
             # Stop the live display
+            # The content is already visible from the Live display,
+            # so we don't need to print it again (this was causing duplicates)
             self.live_display.stop()
             
-            # Print final content to permanent scrollback
-            if self.buffer.strip():
-                content_type = self._detect_content_type()
-                
-                try:
-                    if content_type == 'ansi':
-                        rich_text = Text.from_ansi(self.buffer)
-                        self.console.print(rich_text)
-                        
-                    elif content_type == 'markdown':
-                        markdown = Markdown(
-                            self.buffer,
-                            code_theme=self.code_theme,
-                            hyperlinks=self.enable_hyperlinks,
-                            inline_code_theme=self.inline_code_theme
-                        )
-                        self.console.print(markdown)
-                        
-                    elif content_type == 'mixed':
-                        # For mixed content, use ANSI processing
-                        rich_text = Text.from_ansi(self.buffer)
-                        self.console.print(rich_text)
-                        
-                    else:
-                        self.console.print(Text(self.buffer))
-                        
-                except Exception:
-                    # Fallback to plain text
-                    self.console.print(Text(self.buffer))
-            
+            # Just add a newline for spacing
             self.console.print()  # Final newline
 
 
